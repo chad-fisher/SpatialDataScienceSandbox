@@ -1,0 +1,176 @@
+---
+title: 'L2: GIS in R'
+author: "Chad Fisher"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data and Libraries
+```{r libraries}
+#Set and get working directory
+setwd("C:/Users/Chad/Box/UEP236_Labs")
+getwd()
+
+#load libraries
+library(terra)
+library(sf)
+library(tmap)
+library(exactextractr)
+```
+# Vectors and Rasters
+
+```{r terra_vector}
+# load neighborhood shapefile with terra
+nyc <- vect('Lab2/Lab2/nyc_neighborhood.shp')
+nyc
+summary(nyc)
+class(nyc)
+names(nyc)
+
+# extract attribute table
+nyc.df <- as.data.frame(nyc)
+
+#Plot by area
+plot(nyc,'shape_area')
+
+#Export copy of data
+writeVector(nyc,'Lab2/Lab2/nyc_copy.shp',overwrite=TRUE)
+```
+```{r sf_vector}
+# Read in vector using sf package instead
+nyc_sf <- read_sf('Lab2/Lab2/nyc_neighborhood.shp')
+nyc_sf
+class(nyc_sf)
+names(nyc_sf)
+
+#Plot sf objects
+plot(st_geometry(nyc_sf))
+plot(nyc_sf["shape_area"])
+
+#write to file
+write_sf(nyc_sf, "nyc_sf.geojson", APPEND=F)
+```
+
+```{r terra_raster}
+
+#Read in rasters
+nyc_pm <- rast('Lab2/Lab2/AnnAvg1_12_300mRaster/aa12_pm300m')
+nyc_pm
+
+nyc_elev <- rast('Lab2/Lab2/be_NYC_025_agg30.tif')
+nyc_elev
+```
+
+```{r projections}
+#current CRS
+crs(nyc)
+
+#Project to new CRS
+newcrs <- crs('EPSG:32618')
+nyc_proj <- terra::project(nyc,newcrs)
+```
+
+```{r geocoding}
+#Read and plot points from spreadsheet
+nyc_tweets <- read.csv('Lab2/Lab2/NYC_Tweets.csv')
+plot(nyc_tweets$Lon,nyc_tweets$Lat,pch=16,cex=0.5,col='blue')
+
+#Convert to vector
+nyc_tweet_pts <- st_as_sf(nyc_tweets,coords=c('Lon','Lat'),crs=4326)
+plot(nyc_tweet_pts["Tweet_ID"],col='blue')
+class(nyc_tweet_pts)
+plot(nyc,add=TRUE)
+
+#Fixing projection issues so data layers align on plot
+nyc_tweet_pts_pr <- st_transform(nyc_tweet_pts, crs(nyc_proj))
+plot(nyc_proj)
+plot(nyc_tweet_pts_pr, add=T)
+```
+
+# Geoprocessing
+
+```{r attribute_joins}
+#Read population table
+nyc_poptable <- read.csv('Lab2/Lab2/nyc_population_neighborhood.csv')
+
+# Compare data tables
+names(nyc_poptable)
+names(nyc)
+
+#Join data
+nyc_NBHD_pop <- merge(nyc,nyc_poptable,by='ntacode')
+names(nyc_NBHD_pop)
+
+#Plot
+plot(nyc_NBHD_pop,'Pop2010')
+
+#Calculate pop density
+nyc_NBHD_pop$dens10 <- 1000*(nyc_NBHD_pop$Pop2010/nyc_NBHD_pop$shape_area)
+plot(nyc_NBHD_pop,'dens10')
+
+#Convert to SF
+nyc_NBHD_pop_sf <- st_as_sf(nyc_NBHD_pop)
+qtm(nyc_NBHD_pop_sf,fill='dens10')
+```
+
+```{r spatial_joins}
+#Check type and CRS
+class(nyc_tweet_pts)
+class(nyc_NBHD_pop_sf)
+st_crs(nyc_tweet_pts)
+st_crs(nyc_NBHD_pop_sf)
+
+#Project
+newcrs <- crs('EPSG:2263')
+nyc_NBHD_pop_2263 <- st_transform(nyc_NBHD_pop_sf, newcrs)
+tweets_sf_2263 <- st_transform(nyc_tweet_pts, newcrs)
+
+#Spatial Join
+nhood_target <- st_join(nyc_NBHD_pop_2263, tweets_sf_2263)
+tweets_target <- st_join(tweets_sf_2263, nyc_NBHD_pop_2263)
+nhood_target
+tweets_target
+
+#Aggregate
+tweets_by_NBHD <- aggregate(nhood_target,by=list(nhood_target$ntaname),FUN=length)
+
+#Remove duplicate columns and rename
+tweets_by_NBHD <- tweets_by_NBHD[,1:2]
+colnames(tweets_by_NBHD) <- c("ntaname", "count","geometry")
+
+# Map
+qtm(tweets_by_NBHD, fill = "count")
+
+#Tweets per capita
+tweets_by_NBHD_pop <- merge(tweets_by_NBHD, nyc_poptable,
+by.x = "ntaname", by.y = "NTA.Name")
+tweets_by_NBHD_pop$tweet_per_capita <-
+(tweets_by_NBHD_pop$count/tweets_by_NBHD_pop$Pop2010)*10000
+qtm(tweets_by_NBHD_pop, fill = "tweet_per_capita")
+```
+
+```{r zonal_stats}
+nyc_NBHD_pop_proj <- terra::project(nyc_NBHD_pop,crs(nyc_pm))
+plot(nyc_pm)
+plot(nyc_NBHD_pop_proj,add=T)
+
+#Zonal stats
+nyc_pm_by_NBHD <- exact_extract(
+  x=nyc_pm,
+  y=st_as_sf(nyc_NBHD_pop_proj),
+  fun='mean',
+  append_cols='ntacode'
+)
+nyc_NBHD_meanpm <- merge(
+  nyc_NBHD_pop_sf,
+  nyc_pm_by_NBHD,
+  by='ntacode'
+)
+
+#Map
+qtm(nyc_NBHD_meanpm,fill='mean')
+```

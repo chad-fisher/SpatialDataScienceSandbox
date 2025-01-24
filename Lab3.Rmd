@@ -1,0 +1,136 @@
+---
+title: 'L3: ESDA in R'
+author: "Chad Fisher"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Read in Data
+
+```{r Load_data_and_rename_variables}
+setwd("C:/Users/Chad/Box/UEP236_Labs")
+
+library(sf)
+
+towns_Mass <- read_sf('./Lab3/Towns_MA_spjoin.shp')
+
+#Change Names
+names(towns_Mass)[13]<- paste("Population")
+names(towns_Mass)[14]<- paste("Population Density")
+names(towns_Mass)[17]<- paste("Black Population")
+names(towns_Mass)[32]<- paste("Hispanic Population")
+names(towns_Mass)[36]<- paste("Income")
+names(towns_Mass)[37]<- paste("Rent")
+names(towns_Mass)[33]<- paste("Workers")
+names(towns_Mass)[35]<- paste("Unemployed Workers")
+names(towns_Mass)[46]<- paste("Persons Poverty Level")
+names(towns_Mass)[45]<- paste("Total Persons Poverty Determined")
+names(towns_Mass)[52]<- paste("Housing Value")
+names(towns_Mass)[66]<- paste("Total Releases")
+names(towns_Mass)[64]<- paste("Onsite Releases")
+names(towns_Mass)[65]<- paste("Offsite Releases")
+```
+
+```{r Calculate_Variables}
+#calculate poverty proportion
+towns_Mass$PovProp <- towns_Mass['Persons Poverty Level']/towns_Mass['Total Persons Poverty Determined']
+#calculate percent Black and percent Hispanic
+towns_Mass$HispPerc <- (towns_Mass['Hispanic Population']/towns_Mass['Population'])*100
+towns_Mass$BlackPerc <- (towns_Mass['Black Population']/towns_Mass['Population'])*100
+#calculate unemployment percent
+towns_Mass$UnempPerc <- (towns_Mass['Unemployed Workers']/towns_Mass['Workers'])*100
+
+library(Hmisc)
+towns_Mass$IncCat<- cut2(towns_Mass$Income, g=4, levels.mean = TRUE)
+summary.factor(towns_Mass$IncCat)
+```
+
+```{r data_subset_and_summary}
+towns_Mass_subset <- towns_Mass[, c("Population", "Population Density", "PovProp","HispPerc", "BlackPerc", "UnempPerc", "Housing Value", "Rent", "Income", "Total Releases","Onsite Releases", "Offsite Releases")]
+
+towns_Mass_df <- data.frame(towns_Mass_subset)
+
+library(stargazer)
+
+#text file saved to table1.txt
+stargazer(towns_Mass_df, median=TRUE, type = "text", title="Descriptive statistics", digits=1, out="tablefinal.txt")
+
+#html file which looks nicer
+stargazer(towns_Mass_df, median=TRUE, type = "html", title="Descriptive statistics", digits=1, out="table1.html")
+
+my_subset <- towns_Mass_df[,c('Rent','Population.Density','Income','Offsite.Releases')]
+
+stargazer(my_subset, median=TRUE, type = "html", title="Descriptive statistics", digits=1, out="my_table.html")
+
+```
+
+# Making Plots with ggplot2
+
+```{r ggplot}
+library(ggplot2)
+
+ggplot(my_subset,aes(x=Rent)) +
+  geom_histogram(bins=50) +
+  ggtitle("Histogram of Rent from TRI sites by town") +
+  xlab("Rent") +
+  ylab("Count of Towns")
+```
+
+```{r boxplot}
+p <- ggplot(towns_Mass, aes(x = IncCat, y = Rent)) +
+  stat_boxplot(geom = "errorbar", # Error bars
+               width = 0.25) + # Bars width
+  ggtitle("Boxplots of Rent from TRI sites by
+Income Category") +
+  xlab("Income Category") +
+  ylab("Rent")+
+  geom_boxplot()
+
+p
+```
+
+```{r Parallel_coordinate_plots}
+library(GGally)
+ggparcoord(data= towns_Mass_subset,
+           columns = c(10:12),
+           groupColumn = 9,
+           scale = "std",
+           #boxplot=TRUE,
+           showPoints = TRUE,
+           title="Parallel coordinate plot of Releases grouped by standardized income",
+           mapping = ggplot2::aes(size = 1)) +
+  ggplot2::scale_size_identity() + xlab("") +
+  ylab("Income") +
+  scale_color_gradient(low = "yellow",
+                       high = "brown",
+                       aesthetics = "colour") +
+  theme_dark()
+
+library(RColorBrewer)
+display.brewer.all()
+display.brewer.pal(7, "Spectral")
+
+ggparcoord(data= towns_Mass_subset,
+           columns = c(10:12),
+           groupColumn = 9,
+           scale = "std",
+           #boxplot=TRUE,
+           showPoints = TRUE,
+           title="Parallel coordinate plot of Releases grouped by standardized income",
+           mapping = ggplot2::aes(size = 1)) +
+  ggplot2::scale_size_identity() + xlab("") +
+  ylab("Income") +
+  scale_color_gradientn(colors = brewer.pal(7,"Spectral")) +
+  theme_dark()
+
+```
+
+```{r scatterplot_matrix}
+ggpairs(towns_Mass_subset, columns = c(8, 2, 9, 10, 12),
+        lower = list(continuous = "smooth"),
+        title = "Scatter Plot Matrix", axisLabels = "show")
+```
