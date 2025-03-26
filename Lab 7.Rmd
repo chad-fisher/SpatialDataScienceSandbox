@@ -1,0 +1,212 @@
+---
+title: "Lab7"
+author: "Chad Fisher"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir='C:/Users/Chad/Box/UEP236_Labs')
+```
+
+# Setup and Weight Matrices
+
+```{r start}
+library(sf)
+boston_pt <- read_sf("Lab7/boston_pr.shp")
+boston_poly <- read_sf('Lab7/boston_tract.shp')
+
+plot(st_geometry(boston_pt),col='red')
+plot(st_geometry(boston_poly),add=TRUE)
+```
+
+```{r weights}
+library(spdep)
+
+bost_nbq1 <- poly2nb(boston_poly,queen=TRUE)
+bost_nbq <- nblag(bost_nbq1,3)
+bost_nbq2 <- bost_nbq[[2]]
+
+bost_queen1_rowstd <- nb2listw(bost_nbq1,zero.policy=TRUE)
+bost_queen2_rowstd <- nb2listw(bost_nbq2,zero.policy=TRUE)
+
+bost_q2_card <- card(bost_nbq[[2]])
+hist(bost_q2_card,breaks=30)
+```
+
+```{r global_Morans}
+vars <- c("CMEDV", "LSTAT","PTRAT_Town","NOX_town", "RM", "AGE")
+
+system.time({
+ MoranN <- lapply(vars, function(x) moran.test(boston_poly[[x]],
+listw=bost_queen2_rowstd, zero.policy=TRUE, randomisation=FALSE))
+ MoranR <- lapply(vars, function(x) moran.test(boston_poly[[x]],
+listw=bost_queen2_rowstd, zero.policy=TRUE, randomisation=TRUE))
+})
+
+MoranN
+MoranR
+
+# print the T stat
+res <- sapply(c("MoranN", "MoranR"), function(x) sapply(get(x), "[[",
+"statistic"))
+rownames(res) <- vars
+ores <- res[,c(1,2)]
+print(formatC(res, format="f", digits=4), quote=FALSE)
+# Print the statistic
+res2 <- lapply(c("MoranR"), function(x) sapply(get(x), function(y)
+c(y$estimate[1], y$estimate[2], sqrt(y$estimate[3]))))
+res2 <- t(do.call("rbind", res2))
+colnames(res2) <- c("I", "Exp I", "sigma_I")
+rownames(res2) <- vars
+print(formatC(res2, format="f", digits=4), quote=FALSE)
+
+
+```
+
+```{r visuals}
+library(ggplot2)
+ggplot(boston_poly, 
+       aes(x=`CMEDV`)) + 
+  geom_histogram(bins=50) + 
+  ggtitle("Histogram of Housing value by tract") + 
+  xlab("Housing value in 1000s of dollars") + 
+  ylab("Count of tracts")
+
+library(RColorBrewer)
+pal <- brewer.pal(7, "OrRd") # we select 7 colors from the 
+
+plot(boston_poly["CMEDV"],
+     main='Housing value in 1000s of dolars by census tract', 
+     breaks="jenks",
+     nbreaks = 7,
+     pal = pal)
+
+library(GGally)
+ggpairs(boston_poly, columns = c(15, 22, 23, 21, 29, 27,28,32), 
+        lower = list(continuous = "smooth"), 
+        title = "Scatter Plot Matrix", axisLabels = "show")
+```
+
+# Regression
+
+```{r OLS}
+boston_OLS <- lm(CMEDV~RM + AGE + NOX_town + LSTAT, data=boston_poly)
+summary(boston_OLS)
+
+#Koenker-Bassett
+library(lmtest)
+bptest(boston_OLS)
+#Breusch-Pagan Test
+bptest(boston_OLS, studentize=FALSE)
+#VIF
+library(car)
+vif(boston_OLS)
+#Condition number
+library(mctest)
+omcdiag(boston_OLS)
+
+# saving residuals and fitted values
+boston_poly$olsresid<-residuals(boston_OLS)
+boston_poly$ols_fitted <- fitted(boston_OLS)
+# Moran test for residuals with second order Queens
+lm.morantest(boston_OLS, bost_queen2_rowstd, zero.policy=T)
+#Local Moran's I in rgeoda
+library(rgeoda)
+#create queens weight matrix in rgeoda
+#higher order weights matrix using the order parameter
+boston_queen2nd <- queen_weights(boston_poly,
+order=2,include_lower_order=TRUE, precision_threshold = 0)
+summary(boston_queen2nd)
+lisa_olsresidual <- rgeoda::local_moran(boston_queen2nd,boston_poly["olsresid"])
+summary(lisa_olsresidual)
+lisa_colors <- lisa_colors(lisa_olsresidual)
+lisa_labels <- lisa_labels(lisa_olsresidual)
+lisa_clusters <- lisa_clusters(lisa_olsresidual)
+plot(st_geometry(boston_poly),col=sapply(lisa_clusters, function(x){return(lisa_colors[[x+1]])}),border = "#333333", lwd=0.1)
+title(main = "Local Moran Map of residuals")
+legend('bottomleft', legend = lisa_labels, fill = lisa_colors, border ="#eeeeee")
+
+```
+
+```{r spatial_lag}
+#calculating the lagged housing value
+boston_poly$CMEDV_qlag <- lag.listw(bost_queen2_rowstd,boston_poly$CMEDV,
+zero.policy = TRUE)
+# OLS using lagged housing value as predictor
+boston_hvlag <- lm(CMEDV~CMEDV_qlag, data=boston_poly)
+summary(boston_hvlag)
+```
+
+```{r trend_surface}
+#Use coordinates to get XY if not already in the layer
+boston_pts <- st_centroid(boston_poly)
+boston_trendsurface <- lm(CMEDV~X + Y, data=boston_poly)
+summary(boston_trendsurface)
+# saving residuals and fitted values
+boston_poly$trsurface_resid<-residuals(boston_trendsurface)
+boston_poly$trsurface_fitted <- fitted(boston_trendsurface)
+
+# Moran test for residuals
+lm.morantest(boston_trendsurface, bost_queen2_rowstd, zero.policy=T)
+# is there signficant spatial autocorrelation?
+```
+
+```{r spatial_autoregressive_models}
+# Lagrange multiplier tests for residuals
+lm.LMtests(boston_OLS, bost_queen2_rowstd, test="all", zero.policy=T)
+```
+
+```{r spatial_error}
+# spatial error regression
+library(spatialreg)
+boston_spatial_error <- spatialreg::errorsarlm(CMEDV ~ RM + AGE + NOX_town +
+LSTAT, data=boston_poly, bost_queen2_rowstd, zero.policy=T)
+summary(boston_spatial_error)
+
+boston_poly$error_resid<-residuals(boston_spatial_error)
+boston_poly$error_fitted <- fitted(boston_spatial_error)
+
+pal <- brewer.pal(7, "OrRd") # we select 7 colors from the
+plot(boston_poly["error_resid"],
+ main='Residuals from spatial error',
+ breaks="jenks",
+ nbreaks = 7,
+ pal = pal)
+
+lisa_Errresidual <-
+rgeoda::local_moran(boston_queen2nd,boston_poly["error_resid"])
+summary(lisa_Errresidual)
+lisa_colors <- lisa_colors(lisa_Errresidual)
+lisa_labels <- lisa_labels(lisa_Errresidual)
+lisa_clusters <- lisa_clusters(lisa_Errresidual)
+plot(st_geometry(boston_poly),
+ col=sapply(lisa_clusters, function(x){return(lisa_colors[[x+1]])}),
+ border = "#333333", lwd=0.1)
+title(main = "Local Moran Map of Spatial Error residuals")
+legend('bottomleft', legend = lisa_labels, fill = lisa_colors, border =
+"#eeeeee")
+
+moran.test(boston_poly$error_resid, bost_queen2_rowstd, zero.policy=T)
+# heteroskedascity test for residuals
+bptest.Sarlm(boston_spatial_error)
+
+boston_spatial_lag <- spatialreg:: lagsarlm(CMEDV ~ RM + AGE + NOX_town +
+LSTAT, data=boston_poly, bost_queen2_rowstd, zero.policy=T)
+summary(boston_spatial_lag)
+# saving residuals and fitted values
+boston_poly$splag_resid<-residuals(boston_spatial_lag)
+boston_poly$splag_fitted <- fitted(boston_spatial_lag)
+
+#still have some issues but not as severe as OLS
+moran.test(boston_poly$splag_resid, bost_queen2_rowstd, zero.policy=T)
+bptest.Sarlm(boston_spatial_lag)
+
+library(spatialreg)
+impacts(boston_spatial_lag, listw=bost_queen2_rowstd)
+#also getting p values
+summary(impacts(boston_spatial_lag, listw=bost_queen2_rowstd, R=500),
+zstats = TRUE)
+
+```

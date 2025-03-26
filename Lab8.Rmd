@@ -1,0 +1,177 @@
+---
+title: "Lab 8"
+author: "Chad Fisher"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir='C:/Users/Chad/Box/UEP236_Labs')
+```
+
+# Logistic and Autologistic in R
+
+```{r log_autolog}
+library(sf)
+library(RColorBrewer)
+
+sl <- read_sf("./SriLankaNYCFinal/SriLankaCorrectedFinal_UTM.shp")
+
+#create a poor Secretariat on not variable
+sl$POOR[is.na(sl$POOR)] <- 0
+sl$POORFac <- factor(sl$POOR)
+#ESDA
+#map poor or not
+plot(sl["POOR"],main='Poverty by Secretariat (binary)', breaks="jenks")
+#map percentage poor
+plot(sl["PCTPOOHH"],main='Poverty by Secretariat', breaks="jenks")
+#histograms to see the distribution
+hist(sl$POOR)
+hist(sl$PCTPOOHH, breaks=20)
+summary(sl)
+```
+
+```{r logistic}
+library(spatialEco)
+library(spdep)
+#run a logistic regression
+sl_lmodel <- logistic.regression(sl, y="POOR",
+x=c("NUMAGHH","DISTOWN","DISROADS", "ASSWMAJ3"))
+sl_lmodel$model
+sl_lmodel$diagTable
+sl_lmodel$coefTable
+#save residuals and predicted probabilities
+VarNamesLogModel <- rownames(sl_lmodel$model$var)[-1]
+sl$LogResiduals <- sl_lmodel$Residuals[,1]
+sl$LogStdResiduals <- sl_lmodel$Residuals[,2]
+sl$LogProbs <- predict(sl_lmodel$model,
+ sf::st_drop_geometry(sl[,VarNamesLogModel]),
+type='fitted')
+#plot the probability of being poor predicted by autologistic model
+plot(sl["LogProbs"],main='Poverty probability predicted by Secretariat
+Logistic Model', breaks="jenks")
+```
+
+```{r autologistic}
+#make a dataframe of the variables in the layer
+sl_coord <- st_coordinates(st_centroid(sl))
+sl_df <- data.frame(sl)
+sl_autolmodel <- logistic.regression(sl_df,
+ y="POOR",
+x=c("NUMAGHH","DISTOWN","DISROADS", "ASSWMAJ3"),
+autologistic=TRUE,
+coords=sl_coord)
+sl_autolmodel$model
+sl_autolmodel$diagTable
+sl_autolmodel$coefTable
+#add the residual etc to the dataframe
+sl$AutoCov <- sl_autolmodel$AutoCov
+sl$AutoLogResiduals <- sl_autolmodel$Residuals[,1]
+sl$AutoLogStdResiduals <- sl_autolmodel$Residuals[,2]
+sl$AutoLogProbs <- predict(sl_autolmodel$model,
+ type='fitted')
+#plot the probability of being poor predicted by autologistic model
+plot(sl["AutoLogProbs"],main='Poverty probability predicted by Secretariat
+Autologistic Model', breaks="jenks")
+```
+
+# OLS and GWR in R
+
+```{r OLS_GWR}
+library(spdep) 
+library(spgwr) 
+library(RColorBrewer)
+library(tmap)
+
+# OLS model
+sl_pov_olsmodel <- lm(PCTPOOHH ~ NUMAGHH + MAHARF + DISROADS + DISTOWN + ASSWMAJ3, data=sl) 
+summary(sl_pov_olsmodel)
+
+AIC(sl_pov_olsmodel)  
+
+# GWR models 
+adaptive_bw <- gwr.sel(PCTPOOHH ~ NUMAGHH + MAHARF + DISROADS + 
+                         DISTOWN + ASSWMAJ3, 
+                       data=sl, method = "aic", adapt = TRUE, coords=sl_coord) 
+
+adaptive_bw 
+
+# Optimal adaptive bandwidth for the above case is: approximately 0.04
+# each regression will expand or contract to include roughly 4% of sample
+
+fixed_bw <- ggwr.sel(PCTPOOHH ~ NUMAGHH + MAHARF + DISROADS + 
+                       DISTOWN + ASSWMAJ3, 
+                     data=sl, adapt = FALSE, coords=sl_coord)
+
+fixed_bw
+
+# 21415.7 
+# This means that the bandwidth for each regression using a fixed bandwidth 
+# will include all centroid within approx 21 km  
+
+
+# USING THE ADAPTIVE BISQUARE KERNEL 
+# Note that the input for the adapt command is the value generated 
+# in the calculation above for adaptive.bw  
+sl_adgwr_model <- gwr(PCTPOOHH ~ NUMAGHH + MAHARF + DISROADS + DISTOWN + 
+                     ASSWMAJ3, data=sl, adapt = adaptive_bw, 
+                     hatmatrix = TRUE,
+                     coords=sl_coord) 
+names(sl_adgwr_model) 
+
+summary(sl_adgwr_model) 
+
+names(sl_adgwr_model$results) 
+
+sl_adgwr_model$results$AICc
+
+#Note the drop in AICc compared to regression AIC
+
+# save local coefficients and standard errors to a new dataframe
+gwrmodel_results <- as.data.frame(sl_adgwr_model$SDF)
+
+# join it with the shapefile using ID_2 to match rows for both
+# join it with the spatial data 
+sl_gwr <- cbind(sl, as.matrix(gwrmodel_results))
+sl_gwr_sf <- st_as_sf(sl_gwr)
+
+
+# write your spatial data from R to a shapefile 
+write_sf(sl_gwr, "SriLankaGWR.shp", OVERWRITE=TRUE)
+```
+
+```{r map_GWR}
+# Repeat this section for each variable in your GWR
+# first create a new variable NUMAGHH_T with significant coeff
+#note that R has added a .1 after the variable to show that 
+#this is the coefficient and not the original variable
+sl_gwr$NUMAGHH_T <- sl_gwr$NUMAGHH.1/sl_gwr$NUMAGHH_se
+sl_gwr$DISROADS_T <- sl_gwr$DISROADS.1/sl_gwr$DISROADS_se
+
+#If there are values of Max and/or Min over 1.96 we map it
+#if its not significant use the OLS model coefficient 
+summary(sl_gwr$NUMAGHH_T)
+summary(sl_gwr$DISROADS_T)
+
+#setting the coefficient so that it is only symbolized if T is significant
+sl_gwr$CoeffNUMAGHH <- ifelse(abs(sl_gwr$NUMAGHH_T)>=1.96,sl_gwr$NUMAGHH_T, NA)
+sl_gwr$CoeffDISROADS <- ifelse(abs(sl_gwr$DISROADS_T)>=1.96,sl_gwr$DISROADS_T, NA)
+
+
+#Tmap is better for mapping multiple layers
+#tmap_mode is set to view so that you can zoom in to see location names 
+#change the basemap from the default to Openstreetmap to see place names
+
+#see all pallettes by running the next line without the comment #
+#cols4all::c4a_palettes() 
+
+
+map_slr2 <- tm_shape(sl_gwr) +
+                tm_polygons(fill="localR2", 
+                            fill.scale = tm_scale_intervals(values="brewer.blues", style = "jenks"),
+                            fill.legend = tm_legend(title = "R Squared", size = 0.8))+ 
+                tm_borders() + tmap_mode("view")
+
+map_slr2
+```

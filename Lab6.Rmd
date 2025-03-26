@@ -1,0 +1,523 @@
+---
+title: "Lab6"
+author: "Chad Fisher"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir=r"{C:\Users\Chad\Box\UEP236_Labs\CA\CA}")
+```
+
+# Load Data
+
+```{r setup_markdown}
+#Packages
+library(gstat)
+library(terra)
+
+#Load data
+ozone <- vect("ozone17_pr.shp") 
+pm25 <- vect("pm25_Aug2020.shp")
+
+#Summary stats
+summary(ozone$Ozone)
+summary(pm25$MEAN_davg)
+summary(pm25$MAX_davg)
+
+#Projection
+crs(ozone)
+crs(pm25)
+
+#County shapefile
+counties <- vect("CAcounty.shp")
+crs(counties)
+```
+
+```{r plots}
+plot(ozone, main="Ozone values by station")
+#scaling the size of the circles by Ozone
+plot(ozone, add=TRUE, col='#FF5A0088', pch=20, cex=ozone$Ozone/20)
+plot(counties, add=TRUE)
+
+plot(pm25, main="PM 2.5 values by station in CA 2020 Aug 31", col = "grey")
+#scaling the size of the circles by Pm 2.5 value
+plot(pm25, add=TRUE, col="darkgrey", pch=20, cex=pm25$MAX_davg/20)
+plot(counties, add=TRUE)
+```
+
+```{r histograms}
+hist(ozone$Ozone, breaks = 10, xlab="Ozone ppm", main="Histogram of Ozone")
+hist(log(ozone$Ozone), breaks = 10, xlab="Ozone (log)", main="Histogram of
+log(Ozone)")
+
+hist(pm25$MAX_davg, breaks = 20, main="Histogram of Maximum PM 2.5 measured in µg/m³")
+```
+
+# Interpolation
+
+```{r interpolation}
+#Function to calculate RMSE
+RMSE <- function(observed, predicted) {
+ sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+}
+
+#Assuming average values calculate null model
+null_model_RMSE <- RMSE(mean(ozone$Ozone), ozone$Ozone)
+null_model_RMSE
+
+null_model_RMSE_pm <- RMSE(mean(pm25$MAX_davg), pm25$MAX_davg)
+null_model_RMSE_pm
+```
+
+## Voronoi
+
+```{r voronoi}
+library(spatstat)
+ozone_vpoly <- voronoi(ozone)
+#Plot the tesselation
+plot(ozone_vpoly)
+points(ozone)
+#clip the tesselation
+ozone_vpoly_clip <- crop(ozone_vpoly, counties)
+#plot(ozone_vpoly_clip, "Ozone")
+#set the raster extent
+ozone_vor_rast <- rast(ozone_vpoly_clip, res=1000)
+#set values to raster
+vr <- rasterize(ozone_vpoly_clip, ozone_vor_rast, "Ozone")
+#plot it
+plot(vr, 1, main="Theissen estimates of Ozone")
+plot(counties, add=T)
+
+#RMSE
+
+set.seed(5132015)
+kf <- sample(1:5, nrow(ozone), replace=TRUE)
+rmse_vor <- rep(NA, 5)
+for (k in 1:5) {
+ test <- ozone[kf == k, ]
+ train <- ozone[kf != k, ]
+ v <- voronoi(train)
+ p <- extract(v, test)
+ rmse_vor[k] <- RMSE(test$Ozone, p$Ozone)
+}
+mean(rmse_vor)
+
+
+
+pm25_vpoly <- voronoi(pm25)
+#Plot the tesselation
+plot(pm25_vpoly)
+points(pm25)
+#clip the tesselation
+pm25_vpoly_clip <- crop(pm25_vpoly, counties)
+#plot(pm25_vpoly_clip, "MAX_davg")
+#set the raster extent
+pm25_vor_rast <- rast(pm25_vpoly_clip, res=1000)
+#set values to raster
+vr <- rasterize(pm25_vpoly_clip, pm25_vor_rast, "MAX_davg")
+#plot it
+plot(vr, 1, main="Theissen estimates of PM 2.5")
+plot(counties, add=T)
+
+#calculate ten fold RMSE using random values
+kf <- sample(1:10, nrow(pm25), replace=TRUE)
+rmse_vor_pm <- rep(NA, 10)
+for (k in 1:10) {
+  test <- pm25[kf == k, ]
+  train <- pm25[kf != k, ]
+  v <- voronoi(train)
+  p <- extract(v, test)
+  rmse_vor_pm[k] <- RMSE(test$MAX_davg, p$MAX_davg)
+  rmse_vor_pm[k] 
+}
+mean(rmse_vor_pm)
+```
+
+## Nearest Neighbor
+
+```{r nearest_neighbor}
+library(gstat)
+#Make a data frame with the ozone values for gstat
+d <- data.frame(geom(ozone)[,c("x", "y")], as.data.frame(ozone))
+head(d)
+#Make a raster with the extent of the ozone for gstat
+r <- rast(ozone, res=1000)
+#set up interpolation with intercept only using 5 closest neighbors
+gs <- gstat(formula=Ozone~1, locations=~x+y, data=d, nmax=5, set=list(idp = 0))
+nn <- interpolate(r, gs, debug.level=0)
+nnmsk <- mask(nn, counties)
+plot(nnmsk, 1, main="Nearest five neighbors estimates of Ozone")
+plot(counties, add=T)
+
+rmsenn <- rep(NA, 5)
+for (i in 1:5) {
+  test <- na.omit(d[kf == i, ])
+  train <- na.omit(d[kf != i, ])
+  gscv <- gstat(formula=Ozone~1, locations=~x+y, data=train, 
+                nmax=10, set=list(idp = 0))
+  p <- predict(gscv, test, debug.level=0)$var1.pred
+  rmsenn[i] <- RMSE(test$Ozone, p)
+}
+mean(rmsenn)
+
+
+#Make a data frame with the ozone values for gstat
+d <- data.frame(geom(pm25)[,c("x", "y")], as.data.frame(pm25))
+head(d)
+#Make a raster with the extent of the ozone for gstat
+r <- rast(pm25, res=1000)
+#set up interpolation with intercept only using 5 closest neighbors
+gs <- gstat(formula=MAX_davg~1, locations=~x+y, data=d, nmax=5, set=list(idp =0))
+nn <- interpolate(r, gs, debug.level=0)
+nnmsk <- mask(nn, counties)
+plot(nnmsk, 1, main="Nearest five neighbors estimates of PM 2.5")
+plot(counties, add=T)
+
+
+rmsenn <- rep(NA, 5)
+for (i in 1:5) {
+  test <- na.omit(d[kf == i, ])
+  train <- na.omit(d[kf != i, ])
+  gscv <- gstat(formula=MAX_davg~1, locations=~x+y, data=train, 
+                nmax=10, set=list(idp = 0))
+  p <- predict(gscv, test, debug.level=0)$var1.pred
+  rmsenn[i] <- RMSE(test$MAX_davg, p)
+}
+mean(rmsenn)
+
+```
+
+## Inverse Distance Weighting (IDW)
+
+```{r IDW}
+library(gstat)
+r <- rast(ozone, res=1000)
+d <- data.frame(geom(ozone)[,c("x", "y")], as.data.frame(ozone))
+# idp is the inverse distance weighting power (2 here)
+#nmax is the number of neighbors here 10 default is all the neighbors
+gs_idw <- gstat(formula=Ozone~1, locations=~x+y, nmax=10, data=d,
+set=list(idp = 2))
+idw <- interpolate(r, gs_idw, debug.level=0)
+ozone_idw <- mask(idw, counties)
+plot(ozone_idw, 1, main="IDW estimates of Ozone")
+plot(counties, add=T)
+
+r <- rast(pm25, res=1000)
+d <- data.frame(geom(pm25)[,c("x", "y")], as.data.frame(pm25))
+
+# idp is the inverse distance weighting power (2 here) 
+#nmax is the number of neighbors here 10 default is all the neighbors
+gs_idw_pm <- gstat(formula=MAX_davg~1, locations=~x+y, nmax=10, data=d, set=list(idp = 2))
+idw_pm <- interpolate(r, gs_idw_pm, debug.level=0)
+idw_pm_clip <- mask(idw_pm, counties)
+plot(idw_pm_clip, 1, main="IDW estimates of PM 2.5")
+plot(counties, add=T)
+
+```
+
+## Trend surface interpolation
+
+```{r trend_surface}
+#Trend surface model
+d <- data.frame(geom(ozone)[,c("x", "y")], as.data.frame(ozone))
+r <- rast(ozone, res=1000)
+# Define the 1st order polynomial equation you will use
+Formula_eqn <- as.formula(Ozone ~ x + y)
+#Run the regression model using x and y coordinates to predict Ozone
+ozone_lm <- lm(Formula_eqn, data=d)
+#are x and y siginficant?
+summary(ozone_lm)
+
+#degree 1 is first order
+gs <- gstat(formula=Ozone~1, locations=~x+y, degree=1, data=d)
+ozone_tr <- interpolate(r, gs, debug.level=0)
+ozone_tr_clip <- mask(ozone_tr, counties)
+plot(ozone_tr_clip, 1)
+plot(counties,add=TRUE)
+
+rmse_tr <- rep(NA, 5)
+for (k in 1:5) {
+ test <- na.omit(d[kf == k, ])
+ train <- na.omit(d[kf != k, ])
+ gs <- gstat(formula=Ozone~1, locations=~x+y, degree=1, data=d)
+ p <- predict(gs, test, debug.level=0)
+ rmse_tr[k] <- RMSE(test$Ozone, p$var1.pred)
+}
+mean(rmse_tr)
+
+
+
+#Trend surface model
+d <- data.frame(geom(pm25)[,c("x", "y")], as.data.frame(pm25))
+r <- rast(pm25, res=1000)
+
+# Define the 1st order polynomial equation you will use
+Formula_eqn <- as.formula(MAX_davg ~ x + y) 
+
+#Run the regression model using x and y coordinates to predict PM 2.5
+pm_lm <- lm(Formula_eqn, data=d)
+#are x and y siginficant? 
+summary(pm_lm)
+
+#degree 1 is first order
+gs <- gstat(formula=MAX_davg~1, locations=~x+y, degree=1, data=d)
+pm_tr <- interpolate(r, gs, debug.level=0)
+pm_tr_clip <- mask(pm_tr, counties)
+plot(pm_tr_clip, 1)
+plot(counties,add=TRUE)
+
+rmse_tr <- rep(NA, 5)
+for (k in 1:5) {
+  test <- na.omit(d[kf == k, ])
+  train <- na.omit(d[kf != k, ])
+  gs <- gstat(formula=MAX_davg~1, locations=~x+y, degree=1, data=d)
+  p <- predict(gs, test, debug.level=0)
+  rmse_tr[k] <- RMSE(test$MAX_davg, p$var1.pred)
+}
+mean(rmse_tr)
+```
+
+## Kriging
+
+```{r Kriging}
+#Variogram cloud
+d <- data.frame(geom(ozone)[, c("x", "y")], as.data.frame(ozone))
+gs <- gstat(formula=Ozone~1, locations=~x+y, data=d)
+v_cloud <- variogram(gs, width=2000, cloud=TRUE)
+plot(v_cloud)
+
+#To see the point pairs in the variogram
+vdf <- as.data.frame(v_cloud)
+
+library(ggplot2)
+#You can also plot it by ID to see the point ID
+ggplot(d, aes(x= X_COORD, y= Y_COORD))+
+ geom_point() +geom_text(aes(label=rownames(d)),hjust=0, vjust=0)
+
+# width here means bin is 10000m
+ozone_vgm <- variogram(gs, width = 10000)
+print(plot(ozone_vgm,plot.numbers=T))
+
+# directional variogram
+ozone_dir_vgm <- variogram(gs, data=d, alpha=c(0,45,90,135), width=5000)
+plot(ozone_dir_vgm)
+
+ozone_vgm90 <- subset(ozone_dir_vgm, ozone_dir_vgm$dir.hor == 90)
+# Subset the variogram data for just this direction
+plot(ozone_vgm90)
+
+vgm()
+show.vgms()
+
+#linear fit
+ozone_vgm_fit_linear <- fit.variogram(ozone_vgm90, model=vgm(psill=10000,
+model="Lin", nugget=400,range=94000))
+plot(ozone_vgm, ozone_vgm_fit_linear) # plot the sample values, along with the fit model
+ozone_vgm_fit_linear
+#Gaussian
+ozone_vgm_fit_Gau <- fit.variogram(ozone_vgm90, model=vgm(psill=50000,
+model="Gau", nugget=400,range=94000))
+plot(ozone_vgm, ozone_vgm_fit_Gau) # plot the sample values, along with the fit model
+ozone_vgm_fit_Gau
+
+
+
+#Variogram cloud
+d <- data.frame(geom(pm25)[, c("x", "y")], as.data.frame(pm25))
+gs <- gstat(formula=log(MAX_davg)~1, locations=~x+y, data=d)
+v_cloud <- variogram(gs, width=2000, cloud=TRUE)
+plot(v_cloud)
+
+#To see the point pairs in the variogram
+vdf <- as.data.frame(v_cloud)
+
+ggplot(d, aes(x= X_COORD, y= Y_COORD))+
+  geom_point() +geom_text(aes(label=rownames(d)),hjust=0, vjust=0)
+
+# width here means bin is 10000m 
+pm_vgm <- variogram(gs, width = 15000) 
+print(plot(pm_vgm,plot.numbers=T))
+
+pm_dir_vgm <- variogram(gs, data=d, alpha=c(0,45,90,135), width=5000)
+plot(pm_dir_vgm)
+
+pm_dir_vgm45 <- subset(pm_dir_vgm, pm_dir_vgm$dir.hor == 45)  
+# Subset the variogram data for just this direction
+plot(pm_dir_vgm45)
+
+pm_vgm_fit_Hol <- fit.variogram(pm_dir_vgm45, model=vgm(psill=50000, model="Hol", nugget=400,range=100000))
+plot(pm_vgm, pm_vgm_fit_Hol) # plot the sample values, along with the fit model
+pm_vgm_fit_Hol
+
+pm_vgm_fit_Bes <- fit.variogram(pm_dir_vgm45, model=vgm(psill=50000, model="Bes", nugget=400,range=100000))
+plot(pm_vgm, pm_vgm_fit_Bes) # plot the sample values, along with the fit model
+pm_vgm_fit_Bes
+
+
+```
+
+```{r Ordinary_Kriging}
+ozone_fit <- fit.variogram(ozone_vgm, model=vgm(psill=925, model="Gau",
+nugget=131,range=95000))
+d <- data.frame(geom(ozone)[,c("x", "y")], as.data.frame(ozone))
+r <- rast(ozone, res=1000)
+## ordinary kriging
+ok <- gstat(formula=Ozone ~ 1, locations=~x+y, data=d, model=ozone_fit)
+#predicting
+kp <- interpolate(r, ok, debug.level=0)
+ozone_ok <- mask(kp, counties)
+names(ozone_ok) <- c('prediction', 'variance')
+#plot predictions
+plot(ozone_ok,1)
+plot(counties,add=TRUE)
+#Plot variance
+plot(ozone_ok,2)
+plot(counties,add=TRUE)
+
+
+#Lets try ordinary kriging using Bessel fit 
+pm_fit <- fit.variogram(pm_vgm, model=vgm(psill=100, model="Bes", nugget=400,range=500000))
+d <- data.frame(geom(pm25)[,c("x", "y")], as.data.frame(pm25))
+r <- rast(pm25, res=1000)
+##  ordinary kriging
+ok_pm <- gstat(formula=MAX_davg ~ 1, locations=~x+y, data=d, model=pm_fit)
+#predicting 
+kp <- interpolate(r, ok_pm, debug.level=0)
+ok_pm_clip <- mask(kp, counties)
+names(ok_pm_clip) <- c('prediction', 'variance')
+
+#plot predictions
+plot(ok_pm_clip,1)
+plot(counties,add=TRUE)
+
+#Plot variance
+plot(ok_pm_clip,2)
+plot(counties,add=TRUE)
+```
+
+```{r autokriging}
+####################################Autokriging##############
+#Ordinary kriging by optimizing variogram fit using automap
+library(automap)
+library(sf)
+
+ozone_sf <- st_as_sf(ozone)
+#automap fits the variogram instead of us 
+v_best_ok <- automap::autofitVariogram(Ozone ~ 1, ozone_sf)
+plot(v_best_ok)
+
+d <- data.frame(geom(ozone)[,c("x", "y")], as.data.frame(ozone))
+r <- rast(ozone, res=1000)
+ok_best <- gstat(formula=Ozone ~ 1, locations=~x+y, data=d,
+model=v_best_ok$var_model)
+#predicting
+kp <- interpolate(r, ok_best, debug.level=0)
+ozone_ok_opt <- mask(kp, counties)
+names(ozone_ok_opt) <- c('prediction', 'variance')
+plot(ozone_ok_opt, 1)
+plot(counties,add=TRUE)
+#plotting the variance
+plot(ozone_ok_opt, 2)
+plot(counties,add=TRUE)
+
+pm_sf <- st_as_sf(pm25)
+#automap fits the variogram instead of us 
+v_best_ok_pm <- automap::autofitVariogram(MAX_davg ~ 1, pm_sf)
+plot(v_best_ok_pm)
+
+d <- data.frame(geom(pm25)[,c("x", "y")], as.data.frame(pm25))
+r <- rast(pm25, res=1000)
+ok_best_pm <- gstat(formula=MAX_davg ~ 1, locations=~x+y, data=d, model=v_best_ok_pm$var_model)
+
+#predicting 
+kp <- interpolate(r, ok_best_pm, debug.level=0)
+pm_ok_clip <- mask(kp, counties)
+names(pm_ok_clip) <- c('prediction', 'variance')
+plot(pm_ok_clip, 1)
+plot(counties,add=TRUE)
+
+#plotting the variance
+plot(pm_ok_clip, 2)
+plot(counties,add=TRUE)
+```
+
+```{r cross_validation}
+#IDW
+cv_idw = gstat.cv(gs_idw)
+# var1.pred is Predicted value and observed is the actual value measured
+# residual is Observed-Predicted value
+head(cv_idw)
+#RMSE for IDW
+sqrt(sum((cv_idw$residual)^2) / nrow(cv_idw))
+#Kriging
+cv_ok = gstat.cv(ok)
+#RMSE for Kriging gaussian fit
+sqrt(sum((cv_ok$residual)^2) / nrow(cv_ok))
+#RMSE for Kriging auto fit
+cv_ok_best = gstat.cv(ok_best)
+sqrt(sum((cv_ok_best$residual)^2) / nrow(cv_ok_best))
+
+#bubble plot to show residuals
+cv_ok_vect <- vect(cv_ok, geom=c("x", "y"))
+crs(cv_ok_vect) <- crs(ozone)
+plot(ozone, main="Ozone residual values by station")
+plot(cv_ok_vect, "residual", cex=2, add=T)
+plot(counties, add=T)
+#shows site id labels
+text(ozone, ozone$ADAMSITEID, cex=0.6, pos=4, col="black")
+#where are you over and underpredicting?
+#high values both negative and positive
+#Adding a basemap to make it easier to interact with the data
+#make sure the site id is in the layer
+cv_ok_sf <- st_as_sf(cv_ok_vect)
+cv_ok_sf$ADAMSITEID <- ozone$ADAMSITEID
+#interactive plot
+#change the basemap from default and zoom in
+library(tmap)
+tmap_mode("view")
+tm_shape(cv_ok_sf) +
+  tm_symbols(col="residual", style="jenks", midpoint = NA, palette="-RdYlBu")+
+  tm_text("ADAMSITEID")
+
+
+
+#IDW
+cv_idw_pm = gstat.cv(gs_idw_pm)
+head(cv_idw_pm)
+
+RMSE_idw <- sqrt(sum((cv_idw_pm$residual)^2) / nrow(cv_idw_pm))
+RMSE_idw
+
+cv_ok_pm = gstat.cv(ok_pm)
+
+#RMSE for Kriging Bessel fit 
+RMSE_krige <- sqrt(sum((cv_ok_pm$residual)^2) / nrow(cv_ok_pm))
+#RMSE for Kriging auto fit 
+cv_ok_best = gstat.cv(ok_best_pm)
+
+RMSE_autokrig <- sqrt(sum((cv_ok_best$residual)^2) / nrow(cv_ok_best))
+#Our fit is close to this - we did nearly as well as autofit
+RMSE_krige
+
+RMSE_autokrig
+
+#bubble plot to show residuals 
+cv_ok_vect <- vect(cv_ok_best, geom=c("x", "y"))
+crs(cv_ok_vect) <- crs(pm25)
+plot(pm25, main="PM 2.5 residual values by station")
+plot(cv_ok_vect, "residual", cex=2, add=T, legend=T)
+plot(counties, add=T)
+#shows site id labels
+text(pm25, pm25$ADAMSITEID, cex=0.6, pos=4, col="black")
+
+cv_ok_sf <- st_as_sf(cv_ok_vect)
+cv_ok_sf$ADAMSITEID <- pm25$ADAMSITEID
+
+tmap_mode("view")
+tm_shape(cv_ok_sf) +
+  tm_symbols(col="residual", style="jenks",midpoint = NA, palette="-RdYlBu") +
+  tm_text("ADAMSITEID")
+
+```
